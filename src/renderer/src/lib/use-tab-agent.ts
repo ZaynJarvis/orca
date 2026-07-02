@@ -3,9 +3,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store'
 import { recognizeAgentProcess } from '../../../shared/agent-process-recognition'
 import { isShellProcess } from '../../../shared/agent-detection'
-import { parseRemoteRuntimePtyId } from '@/runtime/runtime-terminal-stream'
-import { isTerminalLeafId, makePaneKey } from '../../../shared/stable-pane-id'
 import { getTitleForegroundKey } from '../../../shared/terminal-foreground-title-key'
+import { useTabAgentForegroundSignals } from './tab-agent-foreground-signals'
+import { resolveTabAgentFromSignals } from './tab-agent-signal-resolution'
 import {
   resolveFocusedCompletedTabAgent,
   resolveFocusedTabAgent,
@@ -15,73 +15,10 @@ import {
 import { resolveExplicitTerminalTitleAgentType } from '../../../shared/terminal-title-agent-type'
 import type { TerminalTab, TuiAgent } from '../../../shared/types'
 
-export { resolveExplicitTerminalTitleAgentType as resolveTabAgentFromTitle } from '../../../shared/terminal-title-agent-type'
+export { resolveTabAgentFromSignals, resolveTabAgentFromTitle } from './tab-agent-signal-resolution'
 
 const HELPER_FOREGROUND_RETRY_DELAYS_MS = [250, 1250, 3500, 750] as const
-const ACTIVE_FOREGROUND_PANE_SEPARATOR = '\u0000'
-
-function paneKeyForTerminalLeaf(tabId: string, leafId: string | null | undefined): string | null {
-  return leafId && isTerminalLeafId(leafId) ? makePaneKey(tabId, leafId) : null
-}
-
-export function resolveTabAgentFromSignals(args: {
-  foreground: TuiAgent | null | undefined
-  hasObservedAgentSignal: boolean
-  shellForegroundAfterAgentSignal: boolean
-  isRemote: boolean
-  title: string
-  hookAgent: TuiAgent | null
-  siblingHookAgent?: TuiAgent | null
-  hasCompletedHook: boolean
-  completedHookAgent?: TuiAgent | null
-  launchAgent?: TuiAgent
-}): TuiAgent | null {
-  const launchAgent = args.launchAgent ?? null
-  const explicitTitleAgent = resolveExplicitTerminalTitleAgentType(args.title)
-  // Why: when a pane is reused for a different agent, its launchAgent goes stale.
-  // A live title that explicitly names a *different* agent, once the pane has
-  // shown any activity, overrides that stale launch identity so the tab icon
-  // tracks what is actually running (codex launch reused for claude, etc.).
-  const titleOverridesLaunch =
-    launchAgent !== null &&
-    explicitTitleAgent !== null &&
-    explicitTitleAgent !== launchAgent &&
-    args.hasObservedAgentSignal
-  const titleAgent = titleOverridesLaunch
-    ? explicitTitleAgent
-    : launchAgent
-      ? null
-      : explicitTitleAgent
-  const titleLooksShell = isShellProcess(args.title)
-  // Why: remote panes cannot cheaply prove shell foreground after hook exit,
-  // so keep the last completed hook identity instead of flashing unknown.
-  const completedHookAgent =
-    !args.isRemote && titleLooksShell && args.hasCompletedHook ? null : args.completedHookAgent
-  const focusedHookAgent = args.hookAgent ?? null
-  const fallbackHookAgent = args.siblingHookAgent ?? completedHookAgent ?? null
-  const localShellForegroundClearedLaunch =
-    !args.isRemote && args.foreground === null && args.shellForegroundAfterAgentSignal
-  const remoteCompletedHookAtShellTitle = args.isRemote && titleLooksShell && args.hasCompletedHook
-  const activeLaunchAgent =
-    localShellForegroundClearedLaunch || remoteCompletedHookAtShellTitle ? null : launchAgent
-  // Why: titleAgent now ranks ahead of launch/fallback hooks because, once the
-  // pane has shown activity, a live explicit title is the freshest identity
-  // signal — it beats a launchAgent gone stale through pane reuse. Before any
-  // activity, titleAgent is null while launchAgent exists, so launch bootstrap
-  // still wins the startup window.
-  if (args.isRemote || args.foreground === undefined) {
-    return focusedHookAgent ?? titleAgent ?? activeLaunchAgent ?? fallbackHookAgent
-  }
-  if (args.foreground) {
-    return args.foreground
-  }
-  // Why: once a local pane has returned to a shell, a stale hook should not keep
-  // painting it as an agent tab.
-  if (args.shellForegroundAfterAgentSignal) {
-    return null
-  }
-  return focusedHookAgent ?? titleAgent ?? activeLaunchAgent ?? fallbackHookAgent
-}
+const INTERRUPT_FOREGROUND_RECHECK_DELAYS_MS = [250, 1250, 2500, 5000, 10_000] as const
 
 /**
  * Resolve which coding-harness agent a terminal tab is running, for its tab-bar
@@ -96,13 +33,7 @@ export function resolveTabAgentFromSignals(args: {
  *    recognized shell authoritatively means "no agent".
  * 2. Hook status — accurate provider identity from native integrations, and
  *    available when foreground inspection is unsupported.
- * 3. launchAgent — what Orca launched here; instant bootstrap before hooks or
- *    foreground polling arrive, and the owned identity for startup windows.
- * 4. Title — legacy/unknown-session fallback, and the live override when a pane
- *    is reused: once the pane has shown activity, a title that explicitly names
- *    a different agent than launchAgent wins over that stale launch identity.
- *    Otherwise it is ignored while launchAgent exists, and generic spinner-only
- *    titles never identify an agent.
+ * 3. Title — explicit title evidence; launchAgent is startup intent only.
  */
 export function useTabAgent(tab: TerminalTab): TuiAgent | null {
   const focusedHookAgent = useAppStore((s) =>
@@ -129,67 +60,48 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
   const hasCompletedHook = focusedCompletedHookAgent !== null
   const clearTabLaunchAgent = useAppStore((s) => s.clearTabLaunchAgent)
 
-  // The focused pane's PTY (single-pane tabs have exactly one leaf).
-  const activeForegroundPaneKey = useAppStore((s) => {
-    const layout = s.terminalLayoutsByTabId[tab.id]
-    const activeLeafId =
-      layout?.activeLeafId ?? (layout?.root?.type === 'leaf' ? layout.root.leafId : null)
-    const leafPty = activeLeafId ? layout?.ptyIdsByLeafId?.[activeLeafId] : undefined
-    const ptyIds = s.ptyIdsByTabId[tab.id] ?? []
-    const ptyId = activeLeafId && leafPty && ptyIds.includes(leafPty) ? leafPty : null
-    if (ptyId) {
-      return `${ptyId}${ACTIVE_FOREGROUND_PANE_SEPARATOR}${paneKeyForTerminalLeaf(tab.id, activeLeafId) ?? ''}`
-    }
-    // Why: without a focused leaf, a split tab's first PTY can be a sibling
-    // shell. Only single-PTY fallback foreground is authoritative.
-    const fallbackPtyId = ptyIds.length === 1 ? ptyIds[0]! : ''
-    const fallbackPaneKey =
-      ptyIds.length === 1 ? (paneKeyForTerminalLeaf(tab.id, activeLeafId) ?? '') : ''
-    return `${fallbackPtyId}${ACTIVE_FOREGROUND_PANE_SEPARATOR}${fallbackPaneKey}`
-  })
-  const [ptyIdRaw, foregroundPaneKeyRaw] = activeForegroundPaneKey.split(
-    ACTIVE_FOREGROUND_PANE_SEPARATOR
-  )
-  const ptyId = ptyIdRaw || null
-  const foregroundPaneKey = foregroundPaneKeyRaw || null
-  const foregroundLifecycleKey = useAppStore((s) => {
-    if (!foregroundPaneKey) {
-      return 'none'
-    }
-    const entry = s.agentStatusByPaneKey[foregroundPaneKey]
-    if (!entry) {
-      return 'none'
-    }
-    // Why: hook lifecycle transitions can signal a foreground change even when
-    // the PTY and terminal title are unchanged.
-    return `${entry.state}:${entry.stateStartedAt}:${entry.agentType}:${entry.terminalTitle ?? ''}`
-  })
-  const hasRemoteRuntimePty = useAppStore((s) => {
-    const layout = s.terminalLayoutsByTabId[tab.id]
-    const ptyIds = new Set(s.ptyIdsByTabId[tab.id] ?? [])
-    for (const ptyId of Object.values(layout?.ptyIdsByLeafId ?? {})) {
-      ptyIds.add(ptyId)
-    }
-    return [...ptyIds].some((ptyId) => parseRemoteRuntimePtyId(ptyId) !== null)
-  })
-  const isRemoteLike = hasRemoteRuntimePty
+  const {
+    ptyId,
+    foregroundPaneKey,
+    foregroundLifecycleKey,
+    foregroundCommandFinishedEpoch,
+    foregroundInterruptEpoch,
+    foregroundInputEpoch,
+    isRemoteLike
+  } = useTabAgentForegroundSignals(tab.id)
   const setForegroundAgentForPane = useAppStore((s) => s.setForegroundAgentForPane)
   const clearForegroundAgentForPane = useAppStore((s) => s.clearForegroundAgentForPane)
 
-  // undefined = no conclusive local reading (defer to title/hook/launchAgent);
+  // undefined = no conclusive local reading (defer to title/hook);
   // null = foreground is a shell; TuiAgent = recognized agent process.
   const [foreground, setForeground] = useState<TuiAgent | null | undefined>(undefined)
+  const [foregroundObservedCommandEpoch, setForegroundObservedCommandEpoch] = useState(0)
   const [hasObservedAgentSignal, setHasObservedAgentSignal] = useState(false)
   const [shellForegroundAfterAgentSignal, setShellForegroundAfterAgentSignal] = useState(false)
+  const [launchShellForegroundExhausted, setLaunchShellForegroundExhausted] = useState(false)
   const hasObservedAgentSignalRef = useRef(false)
+  const foregroundRef = useRef<TuiAgent | null | undefined>(undefined)
+  const foregroundObservedCommandEpochRef = useRef(0)
+  const lastScheduledInterruptRecheckEpochRef = useRef(0)
+  const suppressedForegroundCommandEpochRef = useRef(0)
   const titleForegroundKey = getTitleForegroundKey(tab.title, tab.launchAgent)
 
   useEffect(() => {
+    foregroundRef.current = undefined
+    foregroundObservedCommandEpochRef.current = 0
     setForeground(undefined)
+    setForegroundObservedCommandEpoch(0)
     setHasObservedAgentSignal(false)
     hasObservedAgentSignalRef.current = false
+    lastScheduledInterruptRecheckEpochRef.current = 0
+    suppressedForegroundCommandEpochRef.current = 0
     setShellForegroundAfterAgentSignal(false)
+    setLaunchShellForegroundExhausted(false)
   }, [ptyId, isRemoteLike])
+
+  useEffect(() => {
+    suppressedForegroundCommandEpochRef.current = 0
+  }, [foregroundInputEpoch])
 
   useEffect(() => {
     return () => {
@@ -221,16 +133,34 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
     // signalling a possible foreground transition (agent start, exit, or turn).
     // One RPC per transition, not a timer; cancellation coalesces rapid churn.
     function readForeground(retryIndex = 0): void {
+      const commandFinishedEpoch = foregroundPaneKey
+        ? (useAppStore.getState().terminalCommandFinishedEpochByPaneKey[foregroundPaneKey] ?? 0)
+        : 0
+      const interruptInputEpoch = foregroundPaneKey
+        ? (useAppStore.getState().terminalInterruptInputEpochByPaneKey[foregroundPaneKey] ?? 0)
+        : 0
       window.api.pty
         .getForegroundProcess(localPtyId)
         .then((process) => {
-          applyForegroundProcess(process, retryIndex)
+          // Why: a foreground read can resolve after Ctrl+C/OSC 133 D. Do not
+          // let that stale pre-exit result repaint the tab as an agent.
+          if (
+            foregroundPaneKey &&
+            ((useAppStore.getState().terminalCommandFinishedEpochByPaneKey[foregroundPaneKey] ??
+              0) !== commandFinishedEpoch ||
+              (useAppStore.getState().terminalInterruptInputEpochByPaneKey[foregroundPaneKey] ??
+                0) !== interruptInputEpoch)
+          ) {
+            return
+          }
+          applyForegroundProcess(process, retryIndex, commandFinishedEpoch)
         })
         .catch(() => {
           if (!cancelled) {
             if (foregroundPaneKey) {
               clearForegroundAgentForPane(foregroundPaneKey)
             }
+            foregroundRef.current = undefined
             setForeground(undefined)
           }
         })
@@ -247,15 +177,49 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
       }, delay)
       helperForegroundRetryTimers.push(timer)
     }
-    function applyForegroundProcess(process: string | null, retryIndex: number): void {
+    function hasHelperForegroundRetry(retryIndex: number): boolean {
+      return HELPER_FOREGROUND_RETRY_DELAYS_MS[retryIndex] !== undefined
+    }
+    function applyForegroundProcess(
+      process: string | null,
+      retryIndex: number,
+      observedCommandFinishedEpoch: number
+    ): void {
       if (cancelled) {
         return
       }
       const recognized = recognizeAgentProcess(process)
       if (recognized) {
+        const commandFinishedInvalidatedForeground =
+          foregroundRef.current !== null &&
+          foregroundRef.current !== undefined &&
+          observedCommandFinishedEpoch > foregroundObservedCommandEpochRef.current
+        const commandEpochIsSuppressed =
+          observedCommandFinishedEpoch > 0 &&
+          suppressedForegroundCommandEpochRef.current === observedCommandFinishedEpoch
+        if (commandFinishedInvalidatedForeground || commandEpochIsSuppressed) {
+          // Why: daemon foreground can briefly return the exited agent after
+          // OSC 133 command-finished. Keep the tab cleared until shell wins or
+          // new terminal input starts a fresh command.
+          suppressedForegroundCommandEpochRef.current = observedCommandFinishedEpoch
+          foregroundRef.current = null
+          foregroundObservedCommandEpochRef.current = observedCommandFinishedEpoch
+          setForeground(null)
+          setForegroundObservedCommandEpoch(observedCommandFinishedEpoch)
+          if (foregroundPaneKey) {
+            clearForegroundAgentForPane(foregroundPaneKey)
+          }
+          scheduleHelperForegroundRetry(retryIndex)
+          return
+        }
+        suppressedForegroundCommandEpochRef.current = 0
         hasObservedAgentSignalRef.current = true
         setHasObservedAgentSignal(true)
+        setLaunchShellForegroundExhausted(false)
+        foregroundRef.current = recognized.agent
+        foregroundObservedCommandEpochRef.current = observedCommandFinishedEpoch
         setForeground(recognized.agent)
+        setForegroundObservedCommandEpoch(observedCommandFinishedEpoch)
         if (foregroundPaneKey) {
           setForegroundAgentForPane(foregroundPaneKey, {
             agent: recognized.agent,
@@ -264,12 +228,23 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
           })
         }
       } else if (process && isShellProcess(process)) {
+        suppressedForegroundCommandEpochRef.current = 0
+        foregroundRef.current = null
+        foregroundObservedCommandEpochRef.current = observedCommandFinishedEpoch
         setShellForegroundAfterAgentSignal(hasObservedAgentSignalRef.current)
         setForeground(null)
+        setForegroundObservedCommandEpoch(observedCommandFinishedEpoch)
         if (foregroundPaneKey) {
           clearForegroundAgentForPane(foregroundPaneKey)
         }
         if (tab.launchAgent && !hasObservedAgentSignalRef.current) {
+          // Why: launch intent covers the startup grace window, but after the
+          // bounded shell retries are exhausted it becomes stale cancellation
+          // evidence, such as Ctrl+C before the TUI ever reached foreground.
+          if (!hasHelperForegroundRetry(retryIndex)) {
+            setLaunchShellForegroundExhausted(true)
+            return
+          }
           scheduleHelperForegroundRetry(retryIndex)
         }
       } else {
@@ -283,6 +258,7 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
           hasObservedAgentSignalRef.current = true
           setHasObservedAgentSignal(true)
         }
+        foregroundRef.current = undefined
         setForeground(undefined)
         if (process && tab.launchAgent) {
           scheduleHelperForegroundRetry(retryIndex)
@@ -290,6 +266,18 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
       }
     }
     readForeground()
+    if (
+      foregroundInterruptEpoch > 0 &&
+      foregroundInterruptEpoch > lastScheduledInterruptRecheckEpochRef.current
+    ) {
+      lastScheduledInterruptRecheckEpochRef.current = foregroundInterruptEpoch
+      for (const delay of INTERRUPT_FOREGROUND_RECHECK_DELAYS_MS) {
+        const timer = window.setTimeout(() => {
+          readForeground()
+        }, delay)
+        helperForegroundRetryTimers.push(timer)
+      }
+    }
     return () => {
       cancelled = true
       helperForegroundRetryTimers.forEach((timer) => window.clearTimeout(timer))
@@ -297,6 +285,7 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
   }, [
     clearForegroundAgentForPane,
     foregroundLifecycleKey,
+    foregroundInterruptEpoch,
     foregroundPaneKey,
     isRemoteLike,
     ptyId,
@@ -305,22 +294,39 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
     titleForegroundKey
   ])
 
+  const commandFinishedAfterForegroundObservation =
+    foregroundCommandFinishedEpoch > foregroundObservedCommandEpoch
+  const resolvedForeground =
+    foreground && commandFinishedAfterForegroundObservation ? null : foreground
+
   useEffect(() => {
+    if (resolvedForeground === null && foregroundPaneKey) {
+      clearForegroundAgentForPane(foregroundPaneKey)
+    }
     if (!tab.launchAgent) {
       return
     }
     const titleLooksShell = isShellProcess(tab.title)
     const foregroundSawExitedAgent =
-      !isRemoteLike && foreground === null && shellForegroundAfterAgentSignal
+      !isRemoteLike && resolvedForeground === null && shellForegroundAfterAgentSignal
+    const foregroundStayedShellThroughStartup =
+      !isRemoteLike && resolvedForeground === null && launchShellForegroundExhausted
     const remoteHookCompletedAtShellTitle = isRemoteLike && hasCompletedHook && titleLooksShell
-    if (foregroundSawExitedAgent || remoteHookCompletedAtShellTitle) {
+    if (
+      foregroundSawExitedAgent ||
+      foregroundStayedShellThroughStartup ||
+      remoteHookCompletedAtShellTitle
+    ) {
       clearTabLaunchAgent(tab.id)
     }
   }, [
+    clearForegroundAgentForPane,
     clearTabLaunchAgent,
-    foreground,
+    resolvedForeground,
+    foregroundPaneKey,
     hasCompletedHook,
     isRemoteLike,
+    launchShellForegroundExhausted,
     shellForegroundAfterAgentSignal,
     tab.id,
     tab.launchAgent,
@@ -328,8 +334,9 @@ export function useTabAgent(tab: TerminalTab): TuiAgent | null {
   ])
 
   return resolveTabAgentFromSignals({
-    foreground,
+    foreground: resolvedForeground,
     hasObservedAgentSignal,
+    launchShellForegroundExhausted,
     shellForegroundAfterAgentSignal,
     isRemote: isRemoteLike,
     title: tab.title,

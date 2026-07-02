@@ -1349,6 +1349,7 @@ export function connectPanePty(
     intent: AgentInterruptInputIntent | null = null
   ): void => {
     if (intent === 'ctrl-c' || data === '\x03') {
+      useAppStore.getState().markTerminalInterruptInput(cacheKey)
       markTerminalBracketedPasteInterrupted(pane.terminal)
     }
   }
@@ -1371,6 +1372,7 @@ export function connectPanePty(
   const commandLifecycle = createTerminalCommandLifecycle({
     onCommandFinished: () => {
       const state = useAppStore.getState()
+      state.markTerminalCommandFinished(cacheKey)
       const entry = state.agentStatusByPaneKey[cacheKey]
       const inferenceResult = flushPendingInterruptInference()
       if (inferenceResult === true) {

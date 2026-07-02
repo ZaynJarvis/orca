@@ -335,6 +335,12 @@ export type TerminalSlice = {
     { previousAccountLabel: string; nextAccountLabel: string }
   >
   foregroundAgentByPaneKey: Record<string, TerminalForegroundAgentEntry>
+  /** Runtime-only wake signal for foreground re-checks after OSC 133 command
+   *  completion; not persisted or used as agent identity. */
+  terminalCommandFinishedEpochByPaneKey: Record<string, number>
+  /** Runtime-only wake signal for bounded foreground re-checks after accepted
+   *  terminal interrupts such as Ctrl+C; not persisted or used as identity. */
+  terminalInterruptInputEpochByPaneKey: Record<string, number>
   expandedPaneByTabId: Record<string, boolean>
   canExpandPaneByTabId: Record<string, boolean>
   terminalLayoutsByTabId: Record<string, TerminalLayoutSnapshot>
@@ -438,8 +444,9 @@ export type TerminalSlice = {
        *  with an existing tab anywhere in the store (tabIds form the global
        *  paneKey namespace, so collisions are checked across all worktrees). */
       id?: string
-      /** Coding-harness agent being launched in this tab, recorded so the tab
-       *  bar can show the provider icon before the agent's first hook event. */
+      /** Coding-harness agent being launched in this tab. Startup lifecycle
+       *  uses this as intent, but visible identity still waits for observed
+       *  process, hook, or title evidence. */
       launchAgent?: TuiAgent
       quickCommandLabel?: string | null
       /** Initial native-chat view mode for the unified tab. When the
@@ -458,6 +465,8 @@ export type TerminalSlice = {
   updateTabTitle: (tabId: string, title: string) => void
   setForegroundAgentForPane: (paneKey: string, entry: TerminalForegroundAgentEntry) => void
   clearForegroundAgentForPane: (paneKey: string) => void
+  markTerminalCommandFinished: (paneKey: string) => void
+  markTerminalInterruptInput: (paneKey: string) => void
   setGeneratedTabTitleFromAgentPrompt: (paneKey: string, prompt: string) => void
   clearTabLaunchAgent: (tabId: string) => void
   setRuntimePaneTitle: (tabId: string, paneId: number, title: string) => void
@@ -601,6 +610,8 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   pendingCodexPaneRestartIds: {},
   codexRestartNoticeByPtyId: {},
   foregroundAgentByPaneKey: {},
+  terminalCommandFinishedEpochByPaneKey: {},
+  terminalInterruptInputEpochByPaneKey: {},
   expandedPaneByTabId: {},
   canExpandPaneByTabId: {},
   terminalLayoutsByTabId: {},
@@ -1034,6 +1045,24 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
           delete nextForegroundAgentByPaneKey[paneKey]
         }
       }
+      let nextCommandFinishedEpochByPaneKey = s.terminalCommandFinishedEpochByPaneKey
+      for (const paneKey of Object.keys(s.terminalCommandFinishedEpochByPaneKey)) {
+        if (paneKey.startsWith(`${tabId}:`)) {
+          if (nextCommandFinishedEpochByPaneKey === s.terminalCommandFinishedEpochByPaneKey) {
+            nextCommandFinishedEpochByPaneKey = { ...s.terminalCommandFinishedEpochByPaneKey }
+          }
+          delete nextCommandFinishedEpochByPaneKey[paneKey]
+        }
+      }
+      let nextInterruptInputEpochByPaneKey = s.terminalInterruptInputEpochByPaneKey
+      for (const paneKey of Object.keys(s.terminalInterruptInputEpochByPaneKey)) {
+        if (paneKey.startsWith(`${tabId}:`)) {
+          if (nextInterruptInputEpochByPaneKey === s.terminalInterruptInputEpochByPaneKey) {
+            nextInterruptInputEpochByPaneKey = { ...s.terminalInterruptInputEpochByPaneKey }
+          }
+          delete nextInterruptInputEpochByPaneKey[paneKey]
+        }
+      }
       // Why: preserve the unreadTerminalTabs reference when the closing tab had
       // no unread flag — avoids a no-op top-level state allocation that would
       // force re-evaluation of full-state selectors on unrelated closeTab calls.
@@ -1132,6 +1161,12 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         runtimePaneTitlesByTabId: nextRuntimePaneTitlesByTabId,
         ...(nextForegroundAgentByPaneKey !== s.foregroundAgentByPaneKey
           ? { foregroundAgentByPaneKey: nextForegroundAgentByPaneKey }
+          : {}),
+        ...(nextCommandFinishedEpochByPaneKey !== s.terminalCommandFinishedEpochByPaneKey
+          ? { terminalCommandFinishedEpochByPaneKey: nextCommandFinishedEpochByPaneKey }
+          : {}),
+        ...(nextInterruptInputEpochByPaneKey !== s.terminalInterruptInputEpochByPaneKey
+          ? { terminalInterruptInputEpochByPaneKey: nextInterruptInputEpochByPaneKey }
           : {}),
         // Why: skip writing unreadTerminalTabs when the reference is unchanged —
         // avoids a no-op top-level state allocation that would force re-evaluation
@@ -1477,6 +1512,30 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       delete next[paneKey]
       return { foregroundAgentByPaneKey: next }
     })
+  },
+
+  markTerminalCommandFinished: (paneKey) => {
+    set((s) => ({
+      foregroundAgentByPaneKey:
+        s.foregroundAgentByPaneKey[paneKey] === undefined
+          ? s.foregroundAgentByPaneKey
+          : Object.fromEntries(
+              Object.entries(s.foregroundAgentByPaneKey).filter(([key]) => key !== paneKey)
+            ),
+      terminalCommandFinishedEpochByPaneKey: {
+        ...s.terminalCommandFinishedEpochByPaneKey,
+        [paneKey]: (s.terminalCommandFinishedEpochByPaneKey[paneKey] ?? 0) + 1
+      }
+    }))
+  },
+
+  markTerminalInterruptInput: (paneKey) => {
+    set((s) => ({
+      terminalInterruptInputEpochByPaneKey: {
+        ...s.terminalInterruptInputEpochByPaneKey,
+        [paneKey]: (s.terminalInterruptInputEpochByPaneKey[paneKey] ?? 0) + 1
+      }
+    }))
   },
 
   setRuntimePaneTitle: (tabId, paneId, title) => {
@@ -2019,10 +2078,14 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       const nextUnreadAgentCompletionPanes = { ...s.unreadAgentCompletionPanes }
       const nextLastTerminalInputAtByPaneKey = { ...s.lastTerminalInputAtByPaneKey }
       const nextForegroundAgentByPaneKey = { ...s.foregroundAgentByPaneKey }
+      const nextCommandFinishedEpochByPaneKey = { ...s.terminalCommandFinishedEpochByPaneKey }
+      const nextInterruptInputEpochByPaneKey = { ...s.terminalInterruptInputEpochByPaneKey }
       delete nextUnreadTerminalPanes[opts.paneKey]
       delete nextUnreadAgentCompletionPanes[opts.paneKey]
       delete nextLastTerminalInputAtByPaneKey[opts.paneKey]
       delete nextForegroundAgentByPaneKey[opts.paneKey]
+      delete nextCommandFinishedEpochByPaneKey[opts.paneKey]
+      delete nextInterruptInputEpochByPaneKey[opts.paneKey]
 
       return {
         tabsByWorktree: nextTabsByWorktree,
@@ -2042,7 +2105,9 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         unreadTerminalPanes: nextUnreadTerminalPanes,
         unreadAgentCompletionPanes: nextUnreadAgentCompletionPanes,
         lastTerminalInputAtByPaneKey: nextLastTerminalInputAtByPaneKey,
-        foregroundAgentByPaneKey: nextForegroundAgentByPaneKey
+        foregroundAgentByPaneKey: nextForegroundAgentByPaneKey,
+        terminalCommandFinishedEpochByPaneKey: nextCommandFinishedEpochByPaneKey,
+        terminalInterruptInputEpochByPaneKey: nextInterruptInputEpochByPaneKey
       }
     })
 
@@ -2249,6 +2314,8 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       let nextUnreadAgentCompletionPanes = s.unreadAgentCompletionPanes
       let nextLastTerminalInputAtByPaneKey = s.lastTerminalInputAtByPaneKey
       let nextForegroundAgentByPaneKey = s.foregroundAgentByPaneKey
+      let nextCommandFinishedEpochByPaneKey = s.terminalCommandFinishedEpochByPaneKey
+      let nextInterruptInputEpochByPaneKey = s.terminalInterruptInputEpochByPaneKey
       for (const tab of tabs) {
         if (!keepIdentifiers) {
           delete nextRuntimePaneTitlesByTabId[tab.id]
@@ -2291,6 +2358,22 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
               nextForegroundAgentByPaneKey = { ...s.foregroundAgentByPaneKey }
             }
             delete nextForegroundAgentByPaneKey[paneKey]
+          }
+        }
+        for (const paneKey of Object.keys(nextCommandFinishedEpochByPaneKey)) {
+          if (paneKey.startsWith(`${tab.id}:`)) {
+            if (nextCommandFinishedEpochByPaneKey === s.terminalCommandFinishedEpochByPaneKey) {
+              nextCommandFinishedEpochByPaneKey = { ...s.terminalCommandFinishedEpochByPaneKey }
+            }
+            delete nextCommandFinishedEpochByPaneKey[paneKey]
+          }
+        }
+        for (const paneKey of Object.keys(nextInterruptInputEpochByPaneKey)) {
+          if (paneKey.startsWith(`${tab.id}:`)) {
+            if (nextInterruptInputEpochByPaneKey === s.terminalInterruptInputEpochByPaneKey) {
+              nextInterruptInputEpochByPaneKey = { ...s.terminalInterruptInputEpochByPaneKey }
+            }
+            delete nextInterruptInputEpochByPaneKey[paneKey]
           }
         }
         if (!keepIdentifiers) {
@@ -2346,6 +2429,12 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
           : {}),
         ...(nextForegroundAgentByPaneKey !== s.foregroundAgentByPaneKey
           ? { foregroundAgentByPaneKey: nextForegroundAgentByPaneKey }
+          : {}),
+        ...(nextCommandFinishedEpochByPaneKey !== s.terminalCommandFinishedEpochByPaneKey
+          ? { terminalCommandFinishedEpochByPaneKey: nextCommandFinishedEpochByPaneKey }
+          : {}),
+        ...(nextInterruptInputEpochByPaneKey !== s.terminalInterruptInputEpochByPaneKey
+          ? { terminalInterruptInputEpochByPaneKey: nextInterruptInputEpochByPaneKey }
           : {})
       }
     })

@@ -134,6 +134,8 @@ type StoreState = {
   setAgentStatus: ReturnType<typeof vi.fn>
   removeAgentStatus: ReturnType<typeof vi.fn>
   dropAgentStatus: ReturnType<typeof vi.fn>
+  markTerminalCommandFinished: ReturnType<typeof vi.fn>
+  markTerminalInterruptInput: ReturnType<typeof vi.fn>
   markTerminalTabUnread: ReturnType<typeof vi.fn>
   markTerminalPaneUnread: ReturnType<typeof vi.fn>
   markAgentCompletionPaneUnread: ReturnType<typeof vi.fn>
@@ -653,6 +655,8 @@ describe('connectPanePty', () => {
       }),
       removeAgentStatus: vi.fn(),
       dropAgentStatus: vi.fn(),
+      markTerminalCommandFinished: vi.fn(),
+      markTerminalInterruptInput: vi.fn(),
       markTerminalTabUnread: vi.fn(),
       markTerminalPaneUnread: vi.fn(),
       markAgentCompletionPaneUnread: vi.fn()
@@ -3436,6 +3440,7 @@ describe('connectPanePty', () => {
 
     capturedDataCallback.current?.('\x1b]133;D;130\x07thebr ~/repo $ ')
 
+    expect(mockStoreState.markTerminalCommandFinished).toHaveBeenCalledWith(paneKey)
     expect(mockStoreState.dropAgentStatus).toHaveBeenCalledWith(paneKey)
     expect(mockStoreState.removeAgentStatus).not.toHaveBeenCalled()
   })

@@ -103,7 +103,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('codex')
   })
 
-  it('keeps launch intent during the pre-start shell window', () => {
+  it('ignores launch intent during the pre-start shell window', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: null,
@@ -115,7 +115,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'claude'
       })
-    ).toBe('claude')
+    ).toBeNull()
   })
 
   it('lets shell foreground clear stale identity even when the title still names an agent', () => {
@@ -205,7 +205,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('openclaude')
   })
 
-  it('keeps launch identity over title identity while hooks have not arrived', () => {
+  it('does not use launch identity over generic title text before hooks arrive', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -217,10 +217,10 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'openclaude'
       })
-    ).toBe('openclaude')
+    ).toBeNull()
   })
 
-  it("keeps Codex launch intent over Claude's generic spinner title fallback", () => {
+  it("does not use Codex launch intent over Claude's generic spinner title fallback", () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -232,7 +232,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'codex'
       })
-    ).toBe('codex')
+    ).toBeNull()
   })
 
   it('does not infer Claude identity from a generic spinner title without context', () => {
@@ -267,7 +267,7 @@ describe('resolveTabAgentFromSignals', () => {
     }
   })
 
-  it('keeps launch identity over explicit title identity until stronger signals arrive', () => {
+  it('uses explicit title identity over launch intent before stronger signals arrive', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -279,7 +279,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'codex'
       })
-    ).toBe('codex')
+    ).toBe('claude')
   })
 
   it("uses Codex hook identity over Claude's generic task-title heuristic", () => {
@@ -297,7 +297,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('codex')
   })
 
-  it('keeps launch identity over explicit Claude Code titles without hook or foreground evidence', () => {
+  it('uses explicit Claude Code title evidence without hook or foreground evidence', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -309,7 +309,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'openclaude'
       })
-    ).toBe('openclaude')
+    ).toBe('claude')
   })
 
   it('lets an explicit title override stale launch identity after the pane shows newer activity', () => {
@@ -327,7 +327,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('claude')
   })
 
-  it('does not let an explicit title override launch identity before any activity is observed', () => {
+  it('lets explicit title evidence override launch intent before any activity is observed', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -339,7 +339,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'codex'
       })
-    ).toBe('codex')
+    ).toBe('claude')
   })
 
   it('lets shell foreground clear the icon after an agent was observed running', () => {
@@ -418,7 +418,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('claude')
   })
 
-  it('keeps unresolved launch metadata ahead of sibling-pane hook fallback', () => {
+  it('uses sibling-pane hook fallback ahead of unresolved launch metadata', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -431,7 +431,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'codex'
       })
-    ).toBe('codex')
+    ).toBe('claude')
   })
 
   it('uses sibling-pane hook fallback when no launch metadata exists', () => {
@@ -450,7 +450,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('claude')
   })
 
-  it('keeps launch identity over Claude-owned task text without hook or foreground evidence', () => {
+  it('does not use launch identity over Claude-owned task text without observed evidence', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -462,10 +462,10 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'gemini'
       })
-    ).toBe('gemini')
+    ).toBeNull()
   })
 
-  it('keeps launch identity over Claude-owned punctuation-prefixed task text', () => {
+  it('does not use launch identity over Claude-owned punctuation-prefixed task text', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -477,7 +477,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'opencode'
       })
-    ).toBe('opencode')
+    ).toBeNull()
 
     expect(
       resolveTabAgentFromSignals({
@@ -490,7 +490,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'codex'
       })
-    ).toBe('codex')
+    ).toBeNull()
   })
 
   it('treats Claude-prefixed title text as Claude only when it names Claude', () => {
@@ -521,7 +521,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('claude')
   })
 
-  it('keeps local launch identity when only a shell title suggests exit', () => {
+  it('does not use local launch identity when only a shell title suggests exit', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -533,7 +533,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: false,
         launchAgent: 'codex'
       })
-    ).toBe('codex')
+    ).toBeNull()
   })
 
   it('skips local foreground authority for remote worktrees', () => {
@@ -567,7 +567,7 @@ describe('resolveTabAgentFromSignals', () => {
     ).toBe('codex')
   })
 
-  it('keeps local launch identity after a completed hook until foreground proves shell exit', () => {
+  it('does not use local launch identity after a completed hook without hook identity', () => {
     expect(
       resolveTabAgentFromSignals({
         foreground: undefined,
@@ -579,7 +579,7 @@ describe('resolveTabAgentFromSignals', () => {
         hasCompletedHook: true,
         launchAgent: 'claude'
       })
-    ).toBe('claude')
+    ).toBeNull()
   })
 })
 
@@ -628,12 +628,12 @@ describe('useTabAgent', () => {
     window.api = originalApi
   })
 
-  it('uses unrecognized non-shell foreground as launch lifecycle evidence', async () => {
+  it('uses unrecognized non-shell foreground as launch lifecycle evidence without painting launch identity', async () => {
     getForegroundProcess.mockResolvedValueOnce('node').mockResolvedValueOnce('zsh')
 
     const root = await renderHookProbe(baseTab)
 
-    expect(latestHookAgent).toBe('codex')
+    expect(latestHookAgent).toBeNull()
     expect(clearTabLaunchAgent).not.toHaveBeenCalled()
 
     await rerenderHookProbe(root, { ...baseTab, title: 'zsh' })
@@ -643,14 +643,14 @@ describe('useTabAgent', () => {
     expect(getForegroundProcess).toHaveBeenCalledTimes(2)
   })
 
-  it('retries helper foreground so daemon-derived agent beats stale launch identity', async () => {
+  it('retries helper foreground so daemon-derived agent can paint after launch intent', async () => {
     vi.useFakeTimers()
     getForegroundProcess.mockResolvedValueOnce('uv').mockResolvedValueOnce('claude')
 
     try {
       await renderHookProbe({ ...baseTab, launchAgent: 'opencode' })
 
-      expect(latestHookAgent).toBe('opencode')
+      expect(latestHookAgent).toBeNull()
       expect(getForegroundProcess).toHaveBeenCalledExactlyOnceWith('pty-1')
 
       await act(async () => {
@@ -686,7 +686,7 @@ describe('useTabAgent', () => {
     }
   })
 
-  it('keeps one post-throttle shell retry to observe daemon-derived launch identity', async () => {
+  it('keeps one post-throttle shell retry to observe daemon-derived identity', async () => {
     vi.useFakeTimers()
     getForegroundProcess
       .mockResolvedValueOnce('zsh')
@@ -698,7 +698,7 @@ describe('useTabAgent', () => {
     try {
       await renderHookProbe({ ...baseTab, launchAgent: 'opencode' })
 
-      expect(latestHookAgent).toBe('opencode')
+      expect(latestHookAgent).toBeNull()
       expect(getForegroundProcess).toHaveBeenCalledExactlyOnceWith('pty-1')
 
       await act(async () => {
@@ -707,7 +707,7 @@ describe('useTabAgent', () => {
       await flushHookEffects()
 
       expect(getForegroundProcess).toHaveBeenCalledTimes(4)
-      expect(latestHookAgent).toBe('opencode')
+      expect(latestHookAgent).toBeNull()
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(750)
@@ -856,7 +856,7 @@ describe('useTabAgent', () => {
     expect(getForegroundProcess).not.toHaveBeenCalled()
   })
 
-  it('does not use completed sibling hook status as focused launch lifecycle evidence', async () => {
+  it('uses completed sibling hook status as fallback instead of launch metadata', async () => {
     const siblingPaneKey = makePaneKey('tab-1', SECOND_LEAF_ID)
     getForegroundProcess.mockResolvedValueOnce('zsh')
     useAppStore.setState({
@@ -874,7 +874,7 @@ describe('useTabAgent', () => {
       launchAgent: 'claude'
     })
 
-    expect(latestHookAgent).toBe('claude')
+    expect(latestHookAgent).toBe('codex')
     expect(clearTabLaunchAgent).not.toHaveBeenCalled()
     expect(getForegroundProcess).toHaveBeenCalledExactlyOnceWith('pty-focus')
   })
